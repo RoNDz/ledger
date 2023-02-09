@@ -1,3 +1,50 @@
+## 1.10.0
+
+### Bugs:
+- Fixed table references in TrialBalanceReport (again)
+- Ledger was forcing a name to be present in the default language. Now a named 
+entity must have at least one name in any language.
+
+### Changes:
+- Added a description property to entry queries, allowing wildcard matches on the description.
+- Changed the error code on unknown operations from Rule Violation to Bad Request.
+- Added query operations for currencies, domains, and sub-journals.
+- Expanded query selection capabilities by adding `codes` and `names` properties where relevant.
+- Updated JSON schemas and documentation.
+
+## 1.9.0
+
+### Bugs
+- [Issue 10](https://github.com/abivia/ledger/issues/10) exposed several cases where performing operations
+before the ledger was created resulted in confusing responses instead of an error.
+- [Issue 12](https://github.com/abivia/ledger/issues/12) The sub-journal was bing validated byt not stored
+in the journal entry.
+
+### Changes
+- ControllerResultHandler::unexpectedException() returns a generic error string suitable for
+returning to an API call, instead of void.
+- LedgerAccount::rules() has a new `required` argument that will throw a Breaker instead of
+returning null. It defaults to true.
+
+## 1.8.3
+
+### Bugs:
+- It was possible to give two ledger accounts the same name in the same language.
+- It was possible to give two ledger domains the same name in the same language.
+
+### Changes:
+- Updated tests to catch the duplicate naming problem.
+
+## 1.8.2
+
+### Bugs:
+- Description arguments in Entry messages were not correctly handled.
+- Running a trial balance report on an empty journal generated an error. Thanks to @RoNDz for
+finding this (Issue #9).
+
+### Changes:
+- New test case for Issue 9.
+
 ## 1.8.1
 
 ### Changes:

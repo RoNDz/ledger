@@ -9,16 +9,17 @@ use Abivia\Ledger\Exceptions\Breaker;
 use Abivia\Ledger\Http\Controllers\LedgerAccount\AddController;
 use Abivia\Ledger\Http\Controllers\LedgerAccount\RootController;
 use Abivia\Ledger\Logic\AccountLogic;
-use Abivia\Ledger\Models\LedgerAccount;
-use Abivia\Ledger\Models\LedgerName;
 use Abivia\Ledger\Messages\Account;
+use Abivia\Ledger\Messages\AccountQuery;
 use Abivia\Ledger\Messages\Create;
 use Abivia\Ledger\Messages\EntityRef;
-use Abivia\Ledger\Messages\AccountQuery;
 use Abivia\Ledger\Messages\Message;
+use Abivia\Ledger\Models\LedgerAccount;
+use Abivia\Ledger\Models\LedgerName;
 use Abivia\Ledger\Traits\Audited;
 use Abivia\Ledger\Traits\ControllerResultHandler;
 use Exception;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use stdClass;
@@ -47,19 +48,6 @@ class LedgerAccountController extends Controller
     }
 
     /**
-     * Create a new ledger root.
-     *
-     * @param Create $message
-     * @return LedgerAccount
-     * @throws Breaker
-     */
-    public function create(Create $message): LedgerAccount
-    {
-        $controller = new RootController();
-        return $controller->create($message);
-    }
-
-    /**
      * Fire a bad request exception.
      *
      * @param array $messages
@@ -71,6 +59,19 @@ class LedgerAccountController extends Controller
             "Errors in request: " . implode(', ', $messages) . "."
         );
         throw Breaker::withCode(Breaker::BAD_REQUEST, $this->errors);
+    }
+
+    /**
+     * Create a new ledger root.
+     *
+     * @param Create $message
+     * @return LedgerAccount
+     * @throws Breaker
+     */
+    public function create(Create $message): LedgerAccount
+    {
+        $controller = new RootController();
+        return $controller->create($message);
     }
 
     /**
@@ -167,13 +168,38 @@ class LedgerAccountController extends Controller
     public function query(AccountQuery $message, int $opFlags): Collection
     {
         $message->validate($opFlags);
-        $query = LedgerAccount::query()
-            ->orderBy('code');
-        if (isset($message->range)) {
-            $query = $query->where('code', '>=', $message->range);
-        }
-        if (isset($message->rangeEnding)) {
-            $query = $query->where('code', '<=', $message->rangeEnding);
+        if (count($message->names)) {
+            // This is somewhat perverse, but not as perverse as what Eloquent does.
+            $dbPrefix = DB::getTablePrefix();
+            $accounts = $dbPrefix . (new LedgerAccount())->getTable();
+            $names = $dbPrefix . (new LedgerName())->getTable();
+
+            // Get a list of all the account codes matching our criteria
+            $codeQuery = DB::table($accounts)
+                ->join($names, "$accounts.ledgerUuid", '=', "$names.ownerUuid")
+                ->select('code')
+                ->orderBy('code')
+                ->limit($message->limit);
+            if (isset($message->after)) {
+                try {
+                    $codeQuery = LedgerAccount::whereEntity('>', $message->after, $codeQuery);
+                } catch (Exception $exception) {
+                    throw Breaker::withCode(Breaker::BAD_ACCOUNT, [$exception->getMessage()]);
+                }
+            }
+            $codeQuery = $codeQuery->where(function ($query) use ($message) {
+                $query = $message->selectNames($query);
+                return $message->selectCodes($query);
+            });
+            $codeList = $codeQuery->get();
+            $query = LedgerAccount::with('names')
+                ->whereIn('code', $codeList->pluck('code'))
+                ->orderBy('code');
+        } else {
+            $query = LedgerAccount::query()
+                ->with('names')
+                ->orderBy('code');
+            $query = $message->selectCodes($query);
         }
         $query->limit($message->limit);
         if (isset($message->after)) {
@@ -207,7 +233,7 @@ class LedgerAccountController extends Controller
             case Message::OP_UPDATE:
                 return $this->update($message);
             default:
-                throw Breaker::withCode(Breaker::RULE_VIOLATION);
+                throw Breaker::withCode(Breaker::BAD_REQUEST, 'Unknown or invalid operation.');
         }
     }
 
@@ -363,20 +389,38 @@ class LedgerAccountController extends Controller
      * @param LedgerAccount $ledgerAccount
      * @param Account $message
      * @return void
+     * @throws Breaker
      */
     protected function updateNames(LedgerAccount $ledgerAccount, Account $message)
     {
         foreach ($message->names as $name) {
-            /** @var LedgerName $ledgerName */
-            /** @noinspection PhpUndefinedMethodInspection */
-            $ledgerName = $ledgerAccount->names->firstWhere('language', $name->language);
-            if ($ledgerName === null) {
-                $ledgerName = new LedgerName();
-                $ledgerName->ownerUuid = $ledgerAccount->ledgerUuid;
-                $ledgerName->language = $name->language;
+            // Check for duplicate names in other Ledger accounts
+            $dupCount = LedgerAccount::where('ledgerUuid', '!=', $ledgerAccount->ledgerUuid)
+                ->whereHas('names', function (Builder $query) use ($name) {
+                    $query->where('language', $name->language)
+                        ->where('name', $name->name);
+                })
+                ->count();
+            if ($dupCount !== 0) {
+                throw Breaker::withCode(
+                    Breaker::RULE_VIOLATION,
+                    __(
+                        "An account with the same name already exists for account"
+                        . " :code in language :language",
+                        ['code' => $ledgerAccount->code, 'language' => $name->language]
+                    )
+                );
             }
-            $ledgerName->name = $name->name;
-            $ledgerName->save();
+            $name->applyTo($ledgerAccount);
+            // Ensure there is at least one name remaining
+            if (
+                LedgerName::where('ownerUuid', $ledgerAccount->ledgerUuid)
+                    ->count() === 0
+            ) {
+                throw Breaker::withCode(
+                    Breaker::BAD_REQUEST, 'Account must have at least one name.'
+                );
+            }
         }
     }
 

@@ -19,6 +19,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Query\Builder as DbBuilder;
 use stdClass;
 
 /**
@@ -44,7 +45,11 @@ use stdClass;
  */
 class LedgerAccount extends Model
 {
-    use CommonResponseProperties, HasFactory, HasNames, HasRevisions, UuidPrimaryKey;
+    use CommonResponseProperties;
+    use HasFactory;
+    use HasNames;
+    use HasRevisions;
+    use UuidPrimaryKey;
 
     const CODE_SIZE = 32;
     /**
@@ -121,15 +126,6 @@ class LedgerAccount extends Model
         return $this->hasMany(LedgerBalance::class, 'ledgerUuid', 'ledgerUuid');
     }
 
-    /**
-     * Initialize rules from a default rule set.
-     * @return void
-     */
-    private static function baseRuleSet(): void
-    {
-        self::$bootRules = new LedgerRules();
-    }
-
     public static function createFromMessage(Account $message): self
     {
         $instance = new static();
@@ -202,9 +198,14 @@ class LedgerAccount extends Model
 
     public static function loadRoot(): void
     {
-        self::$root = LedgerAccount::with('names')
-            ->where('code', '')
-            ->first();
+        try {
+            self::$root = LedgerAccount::with('names')
+                ->where('code', '')
+                ->first();
+        } catch (Exception $ex) {
+            // Pathological case where the table doesn't exist yet.
+            self::$root = null;
+        }
     }
 
     public function matchesEntity(EntityRef $ref): bool
@@ -217,6 +218,18 @@ class LedgerAccount extends Model
             $match = false;
         }
         return $match;
+    }
+
+    /**
+     * Throw a missing root error.
+     * @return void
+     * @throws Breaker
+     */
+    private static function noRootError(): void
+    {
+        throw Breaker::withCode(
+            Breaker::RULE_VIOLATION, __('Ledger has not been initialized.')
+        );
     }
 
     /**
@@ -289,7 +302,7 @@ class LedgerAccount extends Model
         self::$root = null;
         self::loadRoot();
         if (self::$root === null) {
-            self::baseRuleSet();
+            self::$bootRules = new LedgerRules();
             return self::$bootRules;
         }
 
@@ -299,14 +312,14 @@ class LedgerAccount extends Model
     /**
      * Get the ledger root singleton, loading it if required.
      *
-     * @throws Exception If there is no root.
+     * @throws Breaker If there is no root.
      */
     public static function root(): LedgerAccount
     {
         if (self::$root === null) {
             self::loadRoot();
             if (self::$root === null) {
-                throw new Exception(__('Ledger root is not defined.'));
+                self::noRootError();
             }
         }
 
@@ -316,24 +329,32 @@ class LedgerAccount extends Model
     /**
      * Get the current rule set. During ledger creation, this is a set of bootstrap rules.
      *
-     * @param bool $bootable
+     * @param bool $bootable True if a base rule set should be returned if no root exists.
+     * @param bool $required True if a root rule set must exist (throws Breaker instead of
+     * returning null).
      * @return LedgerRules|null
+     * @throws Breaker
      */
-    public static function rules(bool $bootable = false): ?LedgerRules
+    public static function rules(bool $bootable = false, bool $required = true): ?LedgerRules
     {
         if (self::$root === null) {
             self::loadRoot();
             if (self::$root === null) {
                 if (!$bootable) {
+                    if ($required) {
+                        self::noRootError();
+                    }
                     return null;
                 }
-                if (!isset(self::$bootRules)) {
-                    self::baseRuleSet();
-                }
+                self::$bootRules ??= new LedgerRules();
                 return self::$bootRules;
             }
         }
-        return self::$root->flex->rules;
+        $rules = self::$root->flex->rules;
+        if ($rules === null) {
+            self::noRootError();
+        }
+        return $rules;
     }
 
     /**
@@ -373,7 +394,7 @@ class LedgerAccount extends Model
             self::loadRoot();
             if (self::$root === null) {
                 if (!isset(self::$bootRules)) {
-                    self::baseRuleSet();
+                    self::$bootRules = new LedgerRules();
                 }
                 Merge::objects(self::$bootRules, $data);
                 return self::$bootRules;
@@ -444,12 +465,12 @@ class LedgerAccount extends Model
      * Add or create a where clause for accounts matching an EntityRef.
      * @param string $operator The SQL operator to ise.
      * @param EntityRef $entityRef The entity to apply the operator to.
-     * @param Builder|null $query An existing query.
+     * @param Builder|DbBuilder|null $query An existing query.
      * @return Builder The query builder.
      * @throws Exception
      */
     public static function whereEntity(
-        string $operator, EntityRef $entityRef, ?Builder $query = null
+        string $operator, EntityRef $entityRef, Builder|DbBuilder $query = null
     ): Builder
     {
         if ($query === null) {

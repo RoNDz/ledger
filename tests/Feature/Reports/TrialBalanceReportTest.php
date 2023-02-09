@@ -3,6 +3,7 @@
 namespace Abivia\Ledger\Tests\Feature\Reports;
 
 use Abivia\Ledger\Messages\Report;
+use Abivia\Ledger\Models\LedgerAccount;
 use Abivia\Ledger\Models\ReportAccount;
 use Abivia\Ledger\Models\ReportData;
 use Abivia\Ledger\Reports\TrialBalanceReport;
@@ -43,6 +44,7 @@ class TrialBalanceReportTest extends TestCaseWithMigrations
     public function setUp(): void
     {
         parent::setUp();
+        LedgerAccount::resetRules();
         self::$expectContent = 'TBD';
     }
 
@@ -54,6 +56,22 @@ class TrialBalanceReportTest extends TestCaseWithMigrations
         $report = new TrialBalanceReport();
         $reportData = $report->collect($request);
         $this->assertCount(139, $reportData->accounts);
+        return $reportData;
+    }
+
+    /**
+     * Regression test for GitHub issue #9.
+     *
+     * @return ReportData
+     * @throws \Abivia\Ledger\Exceptions\Breaker
+     */
+    public function testCollectEmptyJournal()
+    {
+        $this->createLedger(['template']);
+        $request = $this->getRequest();
+        $report = new TrialBalanceReport();
+        $reportData = $report->collect($request);
+        $this->assertCount(1, $reportData->accounts);
         return $reportData;
     }
 

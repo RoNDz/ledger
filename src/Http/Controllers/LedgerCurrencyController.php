@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace Abivia\Ledger\Http\Controllers;
 
 use Abivia\Ledger\Exceptions\Breaker;
+use Abivia\Ledger\Messages\CurrencyQuery;
 use Abivia\Ledger\Models\JournalEntry;
 use Abivia\Ledger\Models\LedgerBalance;
 use Abivia\Ledger\Models\LedgerCurrency;
@@ -12,6 +13,7 @@ use Abivia\Ledger\Messages\Currency;
 use Abivia\Ledger\Messages\Message;
 use Abivia\Ledger\Traits\Audited;
 use Exception;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -146,6 +148,28 @@ class LedgerCurrencyController extends Controller
     }
 
     /**
+     * Return currencies matching a Query.
+     *
+     * @param CurrencyQuery $message
+     * @param int $opFlags
+     * @return Collection
+     * @throws Breaker
+     */
+    public function query(CurrencyQuery $message, int $opFlags): Collection
+    {
+        $message->validate($opFlags);
+        $query = LedgerCurrency::query()
+            ->orderBy('code');
+        $query = $message->selectCodes($query);
+        $query->limit($message->limit);
+        if (isset($message->after)) {
+            $query = $query->where('code', '>', $message->after);
+        }
+
+        return $query->get();
+    }
+
+    /**
      * Perform a currency operation.
      *
      * @param Currency $message
@@ -165,7 +189,7 @@ class LedgerCurrencyController extends Controller
             case Message::OP_UPDATE:
                 return $this->update($message);
             default:
-                throw Breaker::withCode(Breaker::RULE_VIOLATION);
+                throw Breaker::withCode(Breaker::BAD_REQUEST, 'Unknown or invalid operation.');
         }
     }
 
